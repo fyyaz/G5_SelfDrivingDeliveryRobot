@@ -11,3 +11,4 @@ To build the system:
 ## Authors
 Sheran Cardoza, Fyyaz Khan, Shahrooz Ghayouri
 ## Acknowledgements
+We would like to acknowledge the 2017 project Drag and Stamp System where we borrowed the video_in_ip from. It can be found here: https://github.com/mankaijon/G1_DragandStampSystem.
