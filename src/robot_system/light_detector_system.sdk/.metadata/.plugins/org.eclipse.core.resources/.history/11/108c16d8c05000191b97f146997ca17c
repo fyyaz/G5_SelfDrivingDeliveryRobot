@@ -1,0 +1,664 @@
+/*
+* This contains is the main loop for the robot
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "xparameters.h"
+#include "xil_types.h"
+#include "xil_io.h"
+#include "xil_cache.h"
+#include "xstatus.h"
+#include "sleep.h"
+#include "math.h"
+
+//For stream interface macros
+#include "fsl.h"
+
+//Custom Motor Controller API
+#include "motor_controller.h"
+
+//Ultrasonic PMOD API
+#include "PmodMAXSONAR.h"
+#include "range_detector.h"
+
+//Stream ID for LED
+#define LED_POS_FSL_ID 0
+
+#define CAMERA_RES_X 640
+#define CAMERA_RES_Y 480
+
+#define MIN_LED_POS 75
+#define MAX_LED_POS 600
+
+#define MIN_MOTOR_SPEED 0.25
+#define MAX_MOTOR_SPEED 0.45
+
+#define MOTOR_FORWARD_DIR 1
+#define MOTOR_REVERSE_DIR 0
+
+#define FOLLOW_ROTATE 0
+
+//Distance in inches
+#define OBSTACLE_DISTANCE_THRESHOLD 10
+
+#define PMOD_MAXSONAR_LEFT_BASEADDR XPAR_PMODMAXSONAR_0_AXI_LITE_GPIO_BASEADDR
+#define PMOD_MAXSONAR_RIGHT_BASEADDR XPAR_PMODMAXSONAR_1_AXI_LITE_GPIO_BASEADDR
+
+#ifdef __MICROBLAZE__
+#define CLK_FREQ XPAR_CPU_M_AXI_DP_FREQ_HZ
+#else
+#define CLK_FREQ 100000000 // FCLK0 frequency not found in xparameters.h
+#endif
+
+volatile unsigned int * light_detect_controller = (volatile unsigned int *)0x44a00000;
+
+
+int begin = 0;
+
+//Motor speeds
+//Positive is forwards, negative is backwards, 0 disables
+//Values should be between -1 and 1 but keep in mind values below MIN_MOTOR_SPEED may not be powerful enough to drive the robot
+//Adjust these globals to control motors
+double lm_speed = 0.0;
+double rm_speed = 0.0;
+
+//Previous speed of motors
+//DONT MODIFY THESE DIRECTLY
+//USED BY update_motor_control ONLY
+double prev_lm_speed = 0.0;
+double prev_rm_speed = 0.0;
+
+//enum drive_routines{WAIT, FOLLOW, SEARCH, AVOID};
+//This is the current drive routine the robot is doing
+//Do not modify this directly, instead call change_drive_state
+enum drive_routines DRIVE_STATE = FOLLOW;
+
+//State variables for drive routines
+typedef struct wait_vars {
+	int foo;
+} Wait_Routine_vars;
+
+typedef struct follow_vars {
+	int foo;
+} Follow_Routine_vars;
+
+typedef struct search_vars {
+	int rotate_ctr;
+	int travel_ctr;
+	int move_state; //0 for rotate, 1 for travel
+	int MAX_ROTATE; //Maximum amount of time to rotate for approx 360 degrees
+	int MAX_TRAVEL; //Maximum time to travel
+	int RAND_ROTATE; //Max additional rotation time
+} Search_Routine_vars;
+
+typedef struct avoid_vars {
+	int foo;
+} Avoid_Routine_vars;
+
+
+Wait_Routine_vars wait_vars;
+Search_Routine_vars search_vars;
+Follow_Routine_vars follow_vars;
+Avoid_Routine_vars avoid_vars;
+
+
+//HB3 parameters for left and right motors
+PmodHB3 pmodHB3_L, pmodHB3_R;
+
+//Ultrasonic parameters for left and right MAXSONAR PMODs
+PmodMAXSONAR pmodMAXSONAR_L, pmodMAXSONAR_R;
+
+void monitorSonar() {
+   print("\n\r");
+   u32 dist_l;
+   u32 dist_r;
+   while (1) {
+      dist_l = MAXSONAR_getDistance(&pmodMAXSONAR_L);
+      dist_r = MAXSONAR_getDistance(&pmodMAXSONAR_R);
+      xil_printf("MAXSONAR: distance (in) l=%3d r=%3d\r", dist_l, dist_r);
+      usleep(200000);
+   }
+}
+
+void simulateSonarInterrupt() {
+	u32 dist_l = MAXSONAR_getDistance(&pmodMAXSONAR_L);
+	u32 dist_r = MAXSONAR_getDistance(&pmodMAXSONAR_R);
+	if (dist_l <= OBSTACLE_DISTANCE_THRESHOLD || dist_r <= OBSTACLE_DISTANCE_THRESHOLD) {
+		change_drive_state(AVOID);
+	}
+}
+
+//Sends appropriate motor control information to motor controller HW
+//Based on global lm_speed and rm_speed
+//Assumed to be called every main loop iteration
+void update_motor_control(){
+	double left_motor_val;
+	double right_motor_val;
+
+	int left_motor_dir;
+	int right_motor_dir;
+
+
+	//Convert speeds to motor/direction pairs
+	if (lm_speed < 0){
+		left_motor_val = -lm_speed;
+		left_motor_dir = MOTOR_REVERSE_DIR;
+	}
+	else if (lm_speed > 0){
+		left_motor_val = lm_speed;
+		left_motor_dir = MOTOR_FORWARD_DIR;
+	}
+	else if (lm_speed == 0){
+		left_motor_val = lm_speed;
+		left_motor_dir = MOTOR_REVERSE_DIR;
+	}
+
+	if (rm_speed < 0){
+		right_motor_val = -rm_speed;
+		right_motor_dir = MOTOR_REVERSE_DIR;
+	}
+	else if (rm_speed > 0){
+		right_motor_val = rm_speed;
+		right_motor_dir = MOTOR_FORWARD_DIR;
+	}
+	else if (rm_speed == 0){
+		right_motor_val = rm_speed;
+		right_motor_dir = MOTOR_REVERSE_DIR;
+	}
+
+
+	//Update motor speeds
+
+	//setDir will disable motors so only call them if there is a __change__ in direction
+	if (prev_lm_speed * lm_speed <= 0){
+		HB3_setDir(&pmodHB3_L, left_motor_dir);
+		HB3_motorEnable(&pmodHB3_L);
+
+	}
+	if (prev_rm_speed * rm_speed <= 0){
+		HB3_setDir(&pmodHB3_R, right_motor_dir);
+		HB3_motorEnable(&pmodHB3_R);
+	}
+
+	//xil_printf("MOTOR: %d %d\n", (int)left_motor_dir, (int)right_motor_dir);
+
+	HB3_setMotorSpeed(&pmodHB3_L, left_motor_val);
+	HB3_setMotorSpeed(&pmodHB3_R, right_motor_val);
+
+	//HB3_motorEnable(&pmodHB3_L);
+	//HB3_motorEnable(&pmodHB3_R);
+
+
+	prev_lm_speed = lm_speed;
+	prev_rm_speed = rm_speed;
+
+
+}
+
+//Swich states and perform any global initialization for that state if necessary
+//No need to change state to your own state, only call if you are changing to a different state
+void change_drive_state(enum drive_routines state){
+	switch(state){
+		case WAIT:
+			//Nothing to init for WAIT
+		break;
+		case FOLLOW:
+			//Nothing to init for FOLLOW
+		break;
+		case SEARCH:
+			search_vars.rotate_ctr = 0;
+			search_vars.travel_ctr = 0;
+			search_vars.move_state = 0; //0 for rotate, 1 for travel
+			search_vars.MAX_ROTATE = 100; //Maximum amount of time to rotate for approx 360 degrees
+			search_vars.MAX_TRAVEL = 100; //Maximum time to travel
+			search_vars.RAND_ROTATE = (int)rand() % search_vars.MAX_ROTATE;
+		break;
+		case AVOID:
+			//Init globals for AVOID state
+		break;
+	}
+	DRIVE_STATE = state;
+}
+
+//=============DRIVE ROUTINES START==================
+void wait_routine(int debug_print){
+
+	//Dont actually need led_pos here
+	//Call get_led_pos so fifo doesnt fill up
+	double pos = 0;
+	int err = 0;
+	int led_found = get_led_pos(&pos, &err, debug_print);
+	led_found++;
+
+	//Wait until we want to start
+	lm_speed = 0;
+	rm_speed = 0;
+
+	if (begin){
+		begin = 0;
+		change_drive_state(SEARCH);
+	}
+}
+
+//This is the drive routine for FOLLOW
+//Reads LED position and moves motors in appropriate direction
+//If led not found transition to SEARCH state
+void follow_routine(int rotate, int debug_print){
+
+	double pos = 0;
+	int err = 0;
+
+	int led_found = get_led_pos(&pos, &err, debug_print);
+
+	if (err > 0){
+			//xil_printf("LED POS READ ERR\n");
+	}
+	else if (!led_found){
+		xil_printf("LED LOST!\n");
+		change_drive_state(SEARCH);
+	}
+	else{
+		//NEGATIVE -> LED ON LEFT -> TURN LEFT -> MAX RM (DECREASE LM)
+		if (pos < 0.0){
+			if (!rotate){
+				rm_speed = MAX_MOTOR_SPEED;
+				lm_speed = (double)((MAX_MOTOR_SPEED - MIN_MOTOR_SPEED) * (1.0 - fabs(pos)) + MIN_MOTOR_SPEED);
+
+			}
+			else{
+				rm_speed = (double)((MAX_MOTOR_SPEED - MIN_MOTOR_SPEED) * (fabs(pos)) + MIN_MOTOR_SPEED);
+				lm_speed = -rm_speed;
+			}
+
+		}
+		//POSITIVE -> LED ON RIGHT -> TURN RIGHT -> MAX LM (DECREASE RM)
+		else if (pos > 0.0){
+			if (!rotate){
+				lm_speed = MAX_MOTOR_SPEED;
+				rm_speed = (double)((MAX_MOTOR_SPEED - MIN_MOTOR_SPEED) * (1.0 - fabs(pos)) + MIN_MOTOR_SPEED);
+
+			}
+			else{
+				lm_speed = (double)((MAX_MOTOR_SPEED - MIN_MOTOR_SPEED) * (fabs(pos)) + MIN_MOTOR_SPEED);
+				rm_speed = -lm_speed;
+			}
+		}
+		else{
+
+			if (rotate){
+				lm_speed = 0;
+				rm_speed = 0;
+			}
+			else{
+				lm_speed = MAX_MOTOR_SPEED;
+				rm_speed = MAX_MOTOR_SPEED;
+			}
+
+
+		}
+
+		if (debug_print)
+			xil_printf("POS: %d, LM: %d, RM %d\n", (int)(pos*100), (int)(lm_speed*100), (int)(rm_speed*100));
+
+	}
+
+
+}
+
+//This is the drive routine for SEARCH
+//Search routine rotates the robot approx 360 degrees + random rotation between 0->360
+//Then travels in straight line for certain distance
+//Repeat
+//If led is detected at any point in this routine transition to FOLLOW routine
+void search_routine(int debug_print){
+
+
+	double pos = 0;
+	int err = 0;
+
+	int led_found = get_led_pos(&pos, &err, debug_print);
+
+	//if (!debug_print)
+	//	return;
+	//Rotate robot at least 360 degrees while searching
+	//Move forward in random direction
+	//If led is found at any point resume regular algorithm
+
+	if (err > 0){
+		//xil_printf("LED POS READ ERR\n");
+	}
+	else{
+
+		if (led_found){
+			xil_printf("LED FOUND!\n");
+			//Reset this routines state variables
+			search_vars.rotate_ctr = 0;
+			search_vars.travel_ctr = 0;
+			search_vars.move_state = 0;
+
+			//Update drive state
+			change_drive_state(FOLLOW);
+		}
+		else {
+
+			if (search_vars.move_state == 0){
+				//Rotate robot
+				lm_speed = -(MAX_MOTOR_SPEED + MIN_MOTOR_SPEED)/2.0;
+				rm_speed = (MAX_MOTOR_SPEED + MIN_MOTOR_SPEED)/2.0;
+				//lm_speed = -MIN_MOTOR_SPEED;
+				//rm_speed = MIN_MOTOR_SPEED;
+				search_vars.rotate_ctr++;
+
+				if (debug_print)
+					xil_printf("SEARCH ROTATING \n");
+
+				if (search_vars.rotate_ctr == search_vars.MAX_ROTATE + search_vars.RAND_ROTATE){
+					//Done rotating, transition to travelling in a straight line
+					search_vars.rotate_ctr = 0;
+					search_vars.travel_ctr = 0;
+					search_vars.move_state = 1;
+				}
+			}
+			else if (search_vars.move_state == 1){
+				//Move robot in straight line
+				lm_speed = (MAX_MOTOR_SPEED + MIN_MOTOR_SPEED)/2.0;
+				rm_speed = (MAX_MOTOR_SPEED + MIN_MOTOR_SPEED)/2.0;
+				//lm_speed = MIN_MOTOR_SPEED;
+				//rm_speed = MIN_MOTOR_SPEED;
+
+				search_vars.travel_ctr++;
+
+				if (debug_print)
+					xil_printf("SEARCH TRAVELLING \n");
+
+				if (search_vars.travel_ctr == search_vars.MAX_TRAVEL){
+					//Done rotating, transition to travelling in a straight line
+					search_vars.travel_ctr = 0;
+					search_vars.rotate_ctr = 0;
+					search_vars.move_state = 0;
+				}
+			}
+
+		}
+
+	}
+
+
+}
+
+//This is the drive routine for AVOID
+//Control motors to avoid obstacles
+void avoid_routine(int debug_print){
+	//Dont actually need led_pos here
+	//Call get_led_pos so fifo doesnt fill up when in this state
+	double pos = 0;
+	int err = 0;
+	int led_found = get_led_pos(&pos, &err, debug_print);
+	led_found++;
+
+	//Read Ultrasonic PMODs
+	unsigned int dist_left = MAXSONAR_getDistance(&pmodMAXSONAR_L);
+	unsigned int dist_right = MAXSONAR_getDistance(&pmodMAXSONAR_R);
+
+	if (dist_left > OBSTACLE_DISTANCE_THRESHOLD && dist_right > OBSTACLE_DISTANCE_THRESHOLD) {
+
+		//Move robot in straight line
+		lm_speed = MAX_MOTOR_SPEED;
+		rm_speed = MAX_MOTOR_SPEED;
+
+		//Obstacles cleared - exit state
+		change_drive_state(FOLLOW);
+		//change_drive_state(WAIT);
+
+		if (debug_print)
+			xil_printf("OBSTACLE CLEARED: LEFT=%din RIGHT=%din LM: %d, RM %d\n", dist_left, dist_right, (int)(lm_speed*100), (int)(rm_speed*100));
+
+	} else if (dist_left <= OBSTACLE_DISTANCE_THRESHOLD && dist_right > OBSTACLE_DISTANCE_THRESHOLD) {
+
+		//Obstacle on left
+		lm_speed = MAX_MOTOR_SPEED;
+		rm_speed = -MAX_MOTOR_SPEED;
+
+		if (debug_print)
+			xil_printf("OBSTACLE ON LEFT: LEFT=%din RIGHT=%din LM: %d, RM %d\n", dist_left, dist_right, (int)(lm_speed*100), (int)(rm_speed*100));
+
+	} else if (dist_left > OBSTACLE_DISTANCE_THRESHOLD && dist_right <= OBSTACLE_DISTANCE_THRESHOLD) {
+
+		//Obstacle on right
+		lm_speed = -MAX_MOTOR_SPEED;
+		rm_speed = MAX_MOTOR_SPEED;
+
+		if (debug_print)
+			xil_printf("OBSTACLE ON RIGHT: LEFT=%din RIGHT=%din LM: %d, RM %d\n", dist_left, dist_right, (int)(lm_speed*100), (int)(rm_speed*100));
+
+	} else {
+
+		//Obstacles on both sides - rotate
+		lm_speed = MAX_MOTOR_SPEED;
+		rm_speed = -MAX_MOTOR_SPEED;
+
+		if (debug_print)
+			xil_printf("OBSTACLES ON BOTH SIDES: LEFT=%din RIGHT=%din \n", dist_left, dist_right);
+
+	}
+}
+
+//=============DRIVE ROUTINES END==================
+
+#define HISTORY_SIZE 2
+double pos_history[HISTORY_SIZE];
+double curr_avg_loc = 0.0;
+//Read led position from AXI Stream interface and normalize its x_value between -1.0 and 1.0
+//Return 1 if found, 0 if not found
+//Return led position in led_pos
+//Return error code in error (0, no error, 1 invalid, 2 error)
+int get_led_pos(double* led_pos, int* error, int debug_print){
+
+	//Read from AXI Stream
+	//See FSL section in https://www.xilinx.com/support/documentation/sw_manuals/edk10_oslib_rm.pdf
+	int pos;
+	getfslx(pos, LED_POS_FSL_ID, FSL_NONBLOCKING);
+
+	//Check if data was valid (not empty/null)
+	int is_invalid = 1;
+	fsl_isinvalid(is_invalid);
+
+	if (is_invalid){
+		*error = 1;
+		return 0;
+	}
+
+	int is_error = 1;
+	fsl_iserror(is_error);
+
+	if (is_error){
+		*error = 2;
+		return 0;
+	}
+
+	*error = 0;
+
+	int x_pos = pos;
+	int y_pos = 0;
+	int valid = 1;
+
+	//pos of 0 signifies LED not found
+	if (x_pos == 0)
+		valid = 0;
+
+	double x_loc = 2.0*(double)x_pos / (double)CAMERA_RES_X - 1.0;
+
+
+	if (x_loc < -1.0)
+		x_loc = -1.0;
+	else if(x_loc > 1.0)
+		x_loc = 1.0;
+	else
+		x_loc = x_loc;
+
+	//Calculate moving average
+
+	curr_avg_loc += x_loc/HISTORY_SIZE - pos_history[0]/HISTORY_SIZE;
+	//Shift History
+	for (int i = 0; i < HISTORY_SIZE-1; i++){
+		pos_history[i] = pos_history[i+1];
+	}
+
+	pos_history[HISTORY_SIZE-1] = x_loc;
+
+
+	*led_pos = curr_avg_loc;
+	//*led_pos = x_loc;
+
+	if (debug_print)
+		xil_printf("x, y, valid, loc, avg_loc: %d %d %d %d %d\n", x_pos, y_pos, valid, (int)(x_loc*100), (int)(curr_avg_loc*100));
+
+	//int led_found = (pos & 00080000) >> 19;
+
+	return valid;
+
+}
+
+//Call appropriate drive routine
+//ALL ROUTINES SHOULD BE NON BLOCKING
+void drive_robot(int debug_print){
+	if (FOLLOW_ONLY){
+		DRIVE_STATE = FOLLOW;
+	}
+	else if (AVOID_ONLY){
+		DRIVE_STATE = AVOID;
+	}
+	else{
+
+	}
+	switch(DRIVE_STATE){
+		case WAIT:
+			wait_routine(debug_print);
+		break;
+		case FOLLOW:
+			follow_routine(FOLLOW_ROTATE, debug_print);
+		break;
+		case SEARCH:
+			search_routine(debug_print);
+		break;
+		case AVOID:
+			avoid_routine(debug_print);
+		break;
+	}
+
+	update_motor_control();
+}
+
+//Put any initialization stuff here
+void init_sys(){
+	//Init globals
+	for (int i = 0; i < HISTORY_SIZE; i++)
+		pos_history[i] = 0;
+
+
+
+	//Init RNG
+	//srand(0);
+	//Init motors
+	HB3_init(&pmodHB3_L, M_DIR_BASEADDR_0, M_PWM_BASEADDR_0, M_CLK_FREQ, M_PWM_PER, 0.87);
+    HB3_init(&pmodHB3_R, M_DIR_BASEADDR_1, M_PWM_BASEADDR_1, M_CLK_FREQ, M_PWM_PER, 1.0);
+
+	HB3_setDir(&pmodHB3_L, 1);
+	HB3_setDir(&pmodHB3_R, 1);
+
+	HB3_setMotorSpeed(&pmodHB3_L, 0);
+	HB3_setMotorSpeed(&pmodHB3_R, 0);
+	HB3_motorEnable(&pmodHB3_L);
+	HB3_motorEnable(&pmodHB3_R);
+
+	//Init other stuff like led detector, camera, ultrasonics, interrupts etc.
+	*(light_detect_controller + 1) = 1;//set color
+
+	//Max is max value of opposite color for pixel to be accepted
+    //Min is min value of chosen color for pixel to be accepted
+    unsigned int rmax = 15;
+    unsigned int rmin = 15;
+    unsigned int gmax = 15;
+    unsigned int gmin = 15;
+    unsigned int bmax = 15;
+    unsigned int bmin = 15;
+
+	unsigned int ld_threshs = 0;
+
+    ld_threshs |= rmax;
+    ld_threshs |= rmin << 5;
+    ld_threshs |= gmax << 10;
+    ld_threshs |= gmin << 15;
+    ld_threshs |= bmax << 20;
+    ld_threshs |= bmin << 25;
+
+	*(light_detect_controller + 2) = ld_threshs;
+	*(light_detect_controller + 5) = 1000;
+
+
+	//Init Ultrasonic PMODs
+	//EnableCaches();
+	MAXSONAR_begin(&pmodMAXSONAR_L, PMOD_MAXSONAR_LEFT_BASEADDR, CLK_FREQ);
+	MAXSONAR_begin(&pmodMAXSONAR_R, PMOD_MAXSONAR_RIGHT_BASEADDR, CLK_FREQ);
+
+	//Init obstacle detector IP
+	initObstacleDetectorIP(CLK_FREQ, OBSTACLE_DISTANCE_THRESHOLD);
+
+	//Setup interrupts
+    int Status = startSonarIntc();
+    if (Status == XST_SUCCESS)
+    	xil_printf("Interrupt setup succeeded\r\n");
+    else
+    	xil_printf("Interrupt setup failed\r\n");
+}
+
+//The main function will start a wifi connection, then poll
+//Polling keeps wifi/tcp connection alive, keeps drive routines alive, etc.
+int main()
+{
+	//Platform init
+    init_platform();
+    print("Hello World\n\r");
+
+    //test_motors();
+
+	//Other system initialization
+	init_sys();
+
+	//monitorObstacleDetectorIP();
+	//monitorSonar();
+
+	//change_drive_state(SEARCH);
+	//Counter to limit the rate at which we debug print the position
+	int frames_to_print = 25;
+	int print_counter = 0;
+    while(1){
+
+    	//simulateSonarInterrupt();
+
+		//Non blocking call to adjust motor params, and driving routines
+		if (print_counter == frames_to_print){
+			print_counter = 0;
+			drive_robot(1);
+		}
+		else {
+			drive_robot(0);
+		}
+		print_counter++;
+
+
+		//Do wifi stuff
+
+    };
+
+    print("Done\n\r");
+
+    //DisableCaches();
+    //TearDownInterruptSystem();
+    cleanup_platform();
+    return 0;
+}
+
