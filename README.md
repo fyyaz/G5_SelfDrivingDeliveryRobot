@@ -8,6 +8,13 @@ To build the system:
 1. generate bitstream and export to SDK
 1. open SDK and run the test application
 ## Repository Structure
+* /doc: presentation slides and final group report
+* /src
+	* /light_detector_system
+	* /video_in_ip
+	* /light_detector
+	* /range_detector_ip
+
 ## Authors
 Sheran Cardoza, Fyyaz Khan, Shahrooz Ghayouri
 ## Acknowledgements
