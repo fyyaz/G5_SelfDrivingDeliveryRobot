@@ -1,3 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<session version="1.0">&#x0A;<refactoring comment="Delete resource &apos;light_detect/src/range_detector&apos;" deleteContents="false" description="Delete resource &apos;light_detect/src/range_detector&apos;" element1="/light_detect/src/range_detector" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1553565347563"/>&#x0A;<refactoring comment="Delete resource &apos;light_detect/src/pmod_interrupts.c&apos;" deleteContents="false" description="Delete resource &apos;light_detect/src/pmod_interrupts.c&apos;" element1="/light_detect/src/pmod_interrupts.c" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1553567128184"/>
-</session>
