@@ -25,8 +25,9 @@ module led_detector(
 	input [4:0] r,
 	input [4:0] g,
 	input [4:0] b,
-	output [11:0] x_led,
-	output [8:0] y_led,
+	output [31:0] x_led_acc,
+	output [31:0] y_led_acc,
+	output [31:0] total_acc,
 	output divby0,
 	input [1:0]color,
 	input [4:0] r_max_thresh,
@@ -34,7 +35,8 @@ module led_detector(
 	input [4:0] b_max_thresh,
 	input [4:0] r_min_thresh,
 	input [4:0] g_min_thresh,
-	input [4:0] b_min_thresh
+	input [4:0] b_min_thresh,
+	input [31:0] min_total
 	
 );
 	
@@ -42,8 +44,13 @@ module led_detector(
 	reg [31:0] w_acc_x, w_acc_y, total; //Accumulators
 	
 	//Stored inputs
-	assign x_led = w_acc_x / total;
-	assign y_led = w_acc_y / total;
+	//We set x to 0 so our final position after div ends up at 0 to mark invalid positions
+	//Set total to 1 to avoid 0/0
+	//Else we perform pos = w_acc_x/total
+	assign x_led_acc = (total <= min_total) ? 0 : w_acc_x;
+	assign y_led_acc = w_acc_y;
+	assign total_acc = (total <= min_total) ? 1 : total;
+	//Not used
 	assign divby0 = (total == 0);	
 		
 	always @(posedge clk) 

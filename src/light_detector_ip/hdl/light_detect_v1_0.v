@@ -25,12 +25,27 @@
 		input s_axis_aresetn,
 		
 		//output stream signals
-		output [31:0] m_axis_tdata,
-		output m_axis_tvalid,
-		output m_axis_tuser,
-		input m_axis_tready,
+		//output [31:0] m_axis_tdata,
+		//output m_axis_tvalid,
+		//output m_axis_tuser,
+		//input m_axis_tready,
+		
+		//axi4s master interface
+        //dividend
+        output [31:0] m_axis_dividend_tdata,
+        output m_axis_dividend_tvalid,
+        output m_axis_dividend_tuser,
+        input m_axis_dividend_tready,
+        //divisor
+        output [31:0] m_axis_divisor_tdata,
+        output m_axis_divisor_tvalid,
+        output m_axis_divisor_tuser,
+        input m_axis_divisor_tready,
+		
 		input m_axis_aclk,
 		input m_axis_aresetn,
+		
+		
 		
 		//debug signals
                 output start_frame,
@@ -80,10 +95,15 @@
 	    .s_axis_tlast(s_axis_tlast),
 	    
 	    //axi4s master
-	    .m_axis_tdata(m_axis_tdata),
-        .m_axis_tvalid(m_axis_tvalid),
-        .m_axis_tuser(m_axis_tuser),
-        .m_axis_tready(m_axis_tready),
+	    .m_axis_dividend_tdata(m_axis_dividend_tdata),
+        .m_axis_dividend_tvalid(m_axis_dividend_tvalid),
+        .m_axis_dividend_tuser(m_axis_dividend_tuser),
+        .m_axis_dividend_tready(m_axis_dividend_tready),
+        
+        .m_axis_divisor_tdata(m_axis_divisor_tdata),
+        .m_axis_divisor_tvalid(m_axis_divisor_tvalid),
+        .m_axis_divisor_tuser(m_axis_divisor_tuser),
+        .m_axis_divisor_tready(m_axis_divisor_tready),
         
 	    //axi4lite
 		.S_AXI_ACLK(s00_axi_aclk),

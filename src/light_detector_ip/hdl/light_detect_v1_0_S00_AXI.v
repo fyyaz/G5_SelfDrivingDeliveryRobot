@@ -23,10 +23,16 @@
 		input s_axis_tlast,
 		
 		//axi4s master interface
-	    output reg [31:0] m_axis_tdata,
-        output reg m_axis_tvalid,
-        output m_axis_tuser,
-        input m_axis_tready,
+		//dividend
+	    output reg [31:0] m_axis_dividend_tdata,
+        output reg m_axis_dividend_tvalid,
+        output m_axis_dividend_tuser,
+        input m_axis_dividend_tready,
+        //divisor
+        output reg [31:0] m_axis_divisor_tdata,
+        output reg m_axis_divisor_tvalid,
+        output m_axis_divisor_tuser,
+        input m_axis_divisor_tready,
         
         //debug signals
         output start_frame,
@@ -132,7 +138,7 @@
 	integer	 byte_index;
 	reg	 aw_en;
 	
-	wire [31:0] xpos, ypos;
+	wire [31:0] xpos_acc, ypos_acc, total_acc;
 	wire output_valid;
 
 	// I/O Connections assignments
@@ -450,12 +456,15 @@
 	wire [11:0] x_cnt, y_cnt;
 	wire [4:0] rmax, rmin, bmax, bmin, gmax, gmin; //split threshold register
 	wire val_ready, valid_coord;
+	wire [31:0] min_total;
 	
 	assign r = s_axis_tdata[23:19];
-	assign g = s_axis_tdata[15:10];
+	//assign g = s_axis_tdata[15:10];
+	assign g = s_axis_tdata[15:11];
 	assign b = s_axis_tdata[7:3];
 	
 	assign target_color = slv_reg1;
+	
 	
 	//thresholds
 	assign rmax = slv_reg2[4:0];
@@ -464,6 +473,8 @@
 	assign bmin = slv_reg2[19:15];
 	assign gmax = slv_reg2[24:20];
 	assign gmin = slv_reg2[29:25];
+	
+	assign min_total = slv_reg5;
 	
     led_detector led_detect(
         .clk(S_AXI_ACLK),
@@ -476,8 +487,9 @@
         .r(r),
         .g(g),
         .b(b),
-        .x_led(xpos[11:0]),
-        .y_led(ypos[8:0]),
+        .x_led_acc(xpos_acc),
+        .y_led_acc(ypos_acc),
+        .total_acc(total_acc),
         .divby0(valid_coord),
         .color(target_color),
         .r_max_thresh(rmax),
@@ -485,17 +497,22 @@
         .b_max_thresh(bmax),
         .r_min_thresh(rmin),
         .g_min_thresh(gmin),
-        .b_min_thresh(bmin)
+        .b_min_thresh(bmin),
+        .min_total(min_total)
     );
     
     //axi4s master interface
     always @(posedge S_AXI_ACLK) begin
         if (S_AXI_ARESETN) begin
-            m_axis_tdata <= 32'd0;
-            m_axis_tvalid <= 1'b0;
+            m_axis_dividend_tdata <= 32'd0;
+            m_axis_dividend_tvalid <= 1'b0;
+            m_axis_divisor_tdata <= 32'd0;
+            m_axis_divisor_tvalid <= 1'b0;
         end
-        m_axis_tvalid <= val_ready;
-        m_axis_tdata <= {9'd0, !valid_coord,ypos[8:0], xpos[11:0]};
+        m_axis_dividend_tvalid <= val_ready;
+        m_axis_dividend_tdata <= xpos_acc;
+        m_axis_divisor_tvalid <= val_ready;
+        m_axis_divisor_tdata <= total_acc;
     end
     
     wire enable_y;
